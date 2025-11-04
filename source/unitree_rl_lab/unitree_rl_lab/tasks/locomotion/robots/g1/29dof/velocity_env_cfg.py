@@ -233,6 +233,16 @@ class ObservationsCfg:
     # privileged observations
     critic: CriticCfg = CriticCfg()
 
+    @configclass
+    class AmpCfg(ObsGroup):
+        """Observations for AMP group."""
+        joint_pos_rel = ObsTerm(func=mdp.joint_pos_rel)
+        joint_vel_rel = ObsTerm(func=mdp.joint_vel_rel)
+        root_linear_vel = ObsTerm(func=mdp.base_lin_vel)
+        root_angular_vel = ObsTerm(func=mdp.base_ang_vel)
+
+    amp: AmpCfg = AmpCfg()
+
 
 @configclass
 class RewardsCfg:

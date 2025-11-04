@@ -1,133 +1,142 @@
 import numpy as np
-from scipy.spatial.transform import Rotation as R
+from scipy.interpolate import interp1d
+from scipy.spatial.transform import Rotation, Slerp
+import torch
 
 
-class MotionLoader:
-    def __init__(self, motion_file: str, target_fps: float):
+class Motion:
+    def __init__(self):
+        self.action_pairs = []  # List of (state, next_state) pairs
+
+    def load_motions(
+        self,
+        motion_folder: str,
+        motion_files: list[str],
+        weights: list[float],
+        target_fps: int,
+    ):
         """
-        初始化运动加载器，加载运动数据并插值到目标帧率
+        加载运动数据组
         参数：
-            motion_file: 运动数据文件路径（.npy格式）
-            target_fps: 目标帧率（如50fps）
+            motion_folder: 运动数据文件夹路径
+            motion_files: 运动数据文件名列表（不含扩展名）
+            weights: 每个运动数据的权重列表
         """
-        # 加载运动数据并校验必要键
-        self.motion_data = np.load(motion_file, allow_pickle=True).item()
-        required_keys = ["joint_positions", "root_positions", "root_orientations", "fps"]
-        for key in required_keys:
-            if key not in self.motion_data:
-                raise ValueError(f"运动数据缺少必要键: {key}")
-        
-        # 原始数据参数
-        self.original_fps = self.motion_data["fps"]
-        self.original_num_frames = self.motion_data["joint_positions"].shape[0]
-        self.target_fps = target_fps
-        
-        # 计算原始时间轴和目标时间轴（单位：秒）
-        self.original_time = np.linspace(
-            0, 
-            (self.original_num_frames - 1) / self.original_fps,  # 总时长
-            self.original_num_frames
-        )
-        self.target_num_frames = int(self.original_time[-1] * self.target_fps) + 1  # 目标帧数
-        self.target_time = np.linspace(
-            0, 
-            self.original_time[-1],  # 保持总时长不变
-            self.target_num_frames
-        )
-        
-        # 插值核心数据
-        self.interp_joint_positions = self._interpolate_positions(
-            self.motion_data["joint_positions"]
-        )
-        self.interp_root_positions = self._interpolate_positions(
-            self.motion_data["root_positions"]
-        )
-        self.interp_root_orientations = self._interpolate_orientations(
-            self.motion_data["root_orientations"]
-        )
-        
-        # 重新计算速度（基于插值后的数据和目标帧率）
-        self.joint_velocities = self.compute_velocities(
-            self.interp_joint_positions, self.target_fps
-        )
-        self.root_velocities = self.compute_velocities(
-            self.interp_root_positions, self.target_fps
-        )
+        for motion_file, weight in zip(motion_files, weights):
+            motion_data = f"{motion_folder}/{motion_file}.npy"
+            self.load_motion(motion_data, target_fps)
 
-    def _interpolate_positions(self, positions: np.ndarray) -> np.ndarray:
+    def load_motion(self, motion_file: str, target_fps):
         """
-        对位置数据（关节位置/根位置）进行线性插值
+        加载单个运动数据文件,进行插值和计算，并保存到action_pairs中
         参数：
-            positions: 原始位置数据，形状为 (original_num_frames, ..., 3)
-                       例如关节位置：(N, num_joints, 3)；根位置：(N, 3)
-        返回：
-            插值后的位置数据，形状为 (target_num_frames, ..., 3)
+            motion_file: 运动数据文件路径(含扩展名)
         """
-        # 处理任意维度的位置数据（只要第一维是时间帧）
-        shape = positions.shape
-        num_dims = len(shape)
-        interp_pos = np.zeros((self.target_num_frames, *shape[1:]))
+        data = np.load(motion_file, allow_pickle=True).item()
+        original_dof_positions = data["dof_pos"]
+        original_root_positions = data["root_pos"]
+        original_root_rotation = data["root_rot"]
+        original_fps = data["fps"]
+        itp_dof_pos, itp_dof_vel, itp_root_lin_vel, itp_root_ang_vel = (
+            self.interpolate_motion_data(
+                original_dof_positions,
+                original_root_positions,
+                original_root_rotation,
+                original_fps,
+                target_fps,
+            )
+        )
+        for i in range(itp_dof_pos.shape[0] - 1):
+            state = torch.cat(
+                [
+                    itp_dof_pos[i],
+                    itp_dof_vel[i],
+                    itp_root_lin_vel[i],
+                    itp_root_ang_vel[i],
+                ],
+                dim=0,
+            )
+            next_state = torch.cat(
+                [
+                    itp_dof_pos[i + 1],
+                    itp_dof_vel[i + 1],
+                    itp_root_lin_vel[i + 1],
+                    itp_root_ang_vel[i + 1],
+                ],
+                dim=0,
+            )
+            state_trans_pair = torch.cat([state, next_state], dim=0)
+            self.action_pairs.append(state_trans_pair)
+
+    def interpolate_motion_data(self, dof_pos, root_pos, root_rot, fps, target_fps):
+        """
+        对动作捕捉数据进行线性插值并计算速度/角速度
         
-        # 对每个空间维度单独插值
-        for dim in range(3):
-            # 展平除时间和空间维度外的其他维度（如关节索引）
-            if num_dims == 2:  # 根位置：(N, 3)
-                interp_pos[..., dim] = np.interp(
-                    self.target_time, self.original_time, positions[..., dim]
-                )
-            elif num_dims == 3:  # 关节位置：(N, num_joints, 3)
-                for joint in range(shape[1]):
-                    interp_pos[:, joint, dim] = np.interp(
-                        self.target_time, self.original_time, positions[:, joint, dim]
-                    )
+        参数:
+        dof_pos: numpy.ndarray, shape=(num_frames, 29) - 关节自由度位置数据
+        root_pos: numpy.ndarray, shape=(num_frames, 3) - 根节点位置数据
+        root_rot: numpy.ndarray, shape=(num_frames, 4) - 根节点旋转数据(四元数)
+        fps: int - 原始帧率
+        target_fps: int - 目标帧率
+        
+        返回:
+        dict: 包含插值后的位置、速度、角速度等数据的字典
+        """
+        
+        num_frames = dof_pos.shape[0]
+        
+        # 计算时间轴
+        original_time = np.arange(num_frames) / fps
+        target_time = np.arange(0, original_time[-1], 1/target_fps)
+        num_target_frames = len(target_time)
+        
+        # ------------------------------
+        # DOF位置插值和速度计算
+        # ------------------------------
+        # 使用scipy的interp1d进行线性插值
+        dof_interpolator = interp1d(original_time, dof_pos, axis=0, kind='linear', fill_value='extrapolate')
+        dof_pos_interpolated = dof_interpolator(target_time)
+        
+        # 计算速度 (单位: 单位/秒)
+        dof_vel = np.zeros_like(dof_pos_interpolated)
+        dof_vel[1:] = (dof_pos_interpolated[1:] - dof_pos_interpolated[:-1]) * target_fps
+        
+        # ------------------------------
+        # 根节点位置插值和速度计算
+        # ------------------------------
+        # 使用scipy的interp1d进行线性插值
+        root_pos_interpolator = interp1d(original_time, root_pos, axis=0, kind='linear', fill_value='extrapolate')
+        root_pos_interpolated = root_pos_interpolator(target_time)
+        
+        # 计算速度 (单位: 单位/秒)
+        root_vel = np.zeros_like(root_pos_interpolated)
+        root_vel[1:] = (root_pos_interpolated[1:] - root_pos_interpolated[:-1]) * target_fps
+        
+        # ------------------------------
+        # 根节点旋转插值和角速度计算
+        # ------------------------------
+        # 使用scipy的Slerp进行球面线性插值
+        rotations = Rotation.from_quat(root_rot)
+        slerp = Slerp(original_time, rotations)
+        rotations_interpolated = slerp(target_time)
+        root_rot_interpolated = rotations_interpolated.as_quat()
+        
+        # 计算角速度 (单位: 弧度/秒)
+        root_angular_vel = np.zeros_like(root_rot_interpolated)
+        
+        for i in range(1, num_target_frames):
+            # 计算旋转增量
+            delta_rot = rotations_interpolated[i] * rotations_interpolated[i-1].inv()
+            
+            # 转换为角速度向量
+            angle = delta_rot.magnitude()
+            if angle < 1e-6:
+                axis = np.array([1, 0, 0])  # 默认轴
             else:
-                raise ValueError(f"不支持的位置数据维度: {num_dims}")
-        return interp_pos
-
-    def _interpolate_orientations(self, orientations: np.ndarray) -> np.ndarray:
-        """
-        对根朝向四元数进行球面线性插值（SLERP），保证旋转连贯性
-        参数：
-            orientations: 原始四元数数据，形状为 (original_num_frames, 4)（w, x, y, z 或 x, y, z, w，需与scipy兼容）
-        返回：
-            插值后的四元数数据，形状为 (target_num_frames, 4)
-        """
-        # 转换为scipy的Rotation对象（自动处理四元数格式）
-        original_rots = R.from_quat(orientations)
-        # 计算插值比例（0到1之间，对应目标时间在原始时间中的位置）
-        t = self.target_time / self.original_time[-1] if self.original_time[-1] != 0 else 0
-        # 球面线性插值
-        interp_rots = original_rots.slerp(t)
-        return interp_rots.as_quat()
-
-    def compute_velocities(self, positions: np.ndarray, fps: float) -> np.ndarray:
-        """
-        根据位置数据计算速度（单位：单位/秒）
-        参数：
-            positions: 位置数据，形状为 (num_frames, ..., 3)
-            fps: 帧率，用于计算时间间隔（1/fps）
-        返回：
-            速度数据，形状与positions一致
-        """
-        num_frames = positions.shape[0]
-        velocities = np.zeros_like(positions)
-        if num_frames < 2:
-            return velocities  # 帧数不足时速度为0
+                axis = delta_rot.as_rotvec() / angle
+            
+            # 计算角速度 (弧度/秒)
+            root_angular_vel[i] = np.concatenate([[0], axis * angle * target_fps])
         
-        # 前向差分计算速度（v = Δpos / Δt = (pos[i+1] - pos[i]) * fps）
-        velocities[:-1] = (positions[1:] - positions[:-1]) * fps
-        # 最后一帧复用前一帧的速度（避免越界）
-        velocities[-1] = velocities[-2]
-        return velocities
-
-    def get_interpolated_data(self) -> dict:
-        """返回插值后的完整运动数据"""
-        return {
-            "joint_positions": self.interp_joint_positions,
-            "root_positions": self.interp_root_positions,
-            "root_orientations": self.interp_root_orientations,
-            "joint_velocities": self.joint_velocities,
-            "root_velocities": self.root_velocities,
-            "fps": self.target_fps,
-            "num_frames": self.target_num_frames
-        }
+        # 转换为PyTorch张量
+        return torch.tensor(dof_pos_interpolated, dtype=torch.float32), torch.tensor(dof_vel, dtype=torch.float32), torch.tensor(root_vel, dtype=torch.float32), torch.tensor(root_angular_vel, dtype=torch.float32)

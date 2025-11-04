@@ -34,3 +34,6 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
+    amp_data_path = "path/to/amp/motion"  # path to AMP motion data
+    amp_data_names = ["walk.npy"]
+    amp_data_weights = [1.0]

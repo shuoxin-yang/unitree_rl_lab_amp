@@ -22,6 +22,7 @@ from rsl_rl.modules import (
     StudentTeacherRecurrent,
 )
 from rsl_rl.utils import store_code_state
+from rsl_rl.utils.motion_loader import MotionLoader
 
 
 class OnPolicyRunner:
@@ -135,6 +136,7 @@ class OnPolicyRunner:
         if "amp" in extras["observations"]:
             self.num_amp_obs = extras["observations"]["amp"].shape[1]
             self.amp_joint_names = extras["observations"][""]
+            self.amp_data = MotionLoader()
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
         # initialize writer
