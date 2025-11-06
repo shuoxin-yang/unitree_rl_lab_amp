@@ -7,8 +7,7 @@ class Discriminator(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dim: list[int],
-        reward_scale: float = 1.0,
+        hidden_dims: list[int],
         device: str = "cuda:0",
     ):
         """
@@ -20,11 +19,15 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         # 初始化参数
         self.device = device
-        self.reward_scale = reward_scale
+        # # 添加数据归一化层
+        # self.running_mean = torch.zeros(input_dim, device=device)
+        # self.running_var = torch.ones(input_dim, device=device)
+        # self.batch_norm = nn.BatchNorm1d(input_dim).to(device)
+        # self.batch_norm.eval()  # 固定归一化层参数
         # 构建网络层
         layers = []
         current_dim = input_dim
-        for h_dim in hidden_dim:
+        for h_dim in hidden_dims:
             layers.append(nn.Linear(current_dim, h_dim))
             layers.append(nn.ReLU())
             current_dim = h_dim
@@ -35,26 +38,28 @@ class Discriminator(nn.Module):
         # 启动训练模式
         self.trunk.train()
         self.linear.train()
-        # 定义损失函数
-        self.loss_function = nn.BCEWithLogitsLoss()
 
-    def forward(self, state_trans_pair: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, state_trans_pair: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        前向传播函数，获取判别器奖励
+        前向传播函数，获取判别器输出
         参数：
             state_trans_pair: 形状为 (batch_size, input_dim) 的张量，表示每一个环境的状态-状态转移对
 
         返回：
             reward: 形状为 (batch_size) 的张量，表示每一个环境的判别器奖励
         """
+        # 确保输入是2D张量
+        if state_trans_pair.dim() == 1:
+            state_trans_pair = state_trans_pair.unsqueeze(0)
+
         # 通过网络获取logit
         h = self.trunk(state_trans_pair)
         logit = self.linear(h).squeeze(-1)
         # 计算奖励
-        prob = torch.sigmoid(logit)
-        reward = self.reward_scale * (torch.log(1 - prob + 1e-8))  # 防止log(0)
-
-        return reward
+        reward = torch.max(torch.tensor(0), 1 - 0.25 * ((logit - 1) ** 2))
+        return reward, logit
 
     def compute_loss(
         self,
@@ -72,9 +77,11 @@ class Discriminator(nn.Module):
             loss: 标量张量，表示判别器的损失
         """
         # 获取专家数据和策略数据的logit, 分别计算损失
-        d_policy = self.forward(policy_state_trans_pair)
+        _, d_policy = self.forward(policy_state_trans_pair)
+        # loss_policy = self.loss_function(d_policy, torch.ones_like(d_policy))
         loss_policy = torch.mean((d_policy + 1) ** 2)
-        d_expert = self.forward(expert_state_trans_pair)
+        _, d_expert = self.forward(expert_state_trans_pair)
+        # loss_expert = self.loss_function(d_expert, torch.full_like(d_expert, -1))
         loss_expert = torch.mean((d_expert - 1) ** 2)
         # 计算梯度损失
         loss_gp = self.compute_gradient_penalty(
@@ -83,6 +90,20 @@ class Discriminator(nn.Module):
         # 汇总损失
         loss_sum = loss_expert + loss_policy + 0.5 * loss_gp
         return loss_sum
+
+    def train_mode(self):
+        """
+        切换到训练模式
+        """
+        self.trunk.train()
+        self.linear.train()
+
+    def eval_mode(self):
+        """
+        切换到评估模式
+        """
+        self.trunk.eval()
+        self.linear.eval()
 
     def compute_gradient_penalty(
         self, expert_pairs: torch.Tensor, policy_pairs: torch.Tensor, w_gp
@@ -105,7 +126,7 @@ class Discriminator(nn.Module):
         # 设置插值数据需要梯度
         mix_pair.requires_grad_(True)
         # 计算插值数据的判别器输出
-        d_mix_pair = self.forward(mix_pair)
+        _, d_mix_pair = self.forward(mix_pair)
         # 计算梯度
         gradients = autograd.grad(
             outputs=d_mix_pair,

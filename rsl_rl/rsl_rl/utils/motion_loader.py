@@ -5,7 +5,8 @@ import torch
 
 
 class Motion:
-    def __init__(self):
+    def __init__(self, device: str = "cuda:0"):
+        self.device = device
         self.action_pairs = []  # List of (state, next_state) pairs
 
     def load_motions(
@@ -24,7 +25,8 @@ class Motion:
         """
         for motion_file, weight in zip(motion_files, weights):
             motion_data = f"{motion_folder}/{motion_file}.npy"
-            self.load_motion(motion_data, target_fps)
+            for _ in range(int(weight)):
+                self.load_motion(motion_data, target_fps)
 
     def load_motion(self, motion_file: str, target_fps):
         """
@@ -55,7 +57,7 @@ class Motion:
                     itp_root_ang_vel[i],
                 ],
                 dim=0,
-            )
+            ).to(self.device)
             next_state = torch.cat(
                 [
                     itp_dof_pos[i + 1],
@@ -64,9 +66,20 @@ class Motion:
                     itp_root_ang_vel[i + 1],
                 ],
                 dim=0,
-            )
-            state_trans_pair = torch.cat([state, next_state], dim=0)
+            ).to(self.device)
+            state_trans_pair = torch.cat([state, next_state], dim=0).to(self.device)
             self.action_pairs.append(state_trans_pair)
+
+    def random_get_action_pair(self):
+        """随机获取一个动作对"""
+        index = np.random.randint(0, len(self.action_pairs), 1)
+        return self.action_pairs[index[0]]
+    
+    def random_get_action_pair_batch(self, batch_size: int):
+        """随机获取一批动作对"""
+        indices = np.random.randint(0, len(self.action_pairs), batch_size)
+        batch = torch.stack([self.action_pairs[i] for i in indices], dim=0)
+        return batch
 
     def interpolate_motion_data(self, dof_pos, root_pos, root_rot, fps, target_fps):
         """

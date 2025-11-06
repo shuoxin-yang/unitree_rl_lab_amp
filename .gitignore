@@ -70,3 +70,7 @@ datasets
 *.mtl
 *.STL
 **/env.yaml
+*.npy
+*.npz
+**/test.py
+**/Test.py
