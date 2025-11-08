@@ -7,15 +7,16 @@ import torch.nn as nn
 motion_loader = Motion()
 motion_loader.load_motions(
     motion_folder="./AMP_Motion",
-    motion_files=["AMPdebug"],
+    motion_files=["B15WA"],
     weights=[1.0],
-    target_fps=30,
+    target_fps=50,
 )
 print(motion_loader.action_pairs[0])
 
 discriminator = Discriminator(
     input_dim=motion_loader.action_pairs[0].shape[0],
-    hidden_dims=[256, 256],
+    hidden_dims=[1024, 512],
+    dropout_rate=0.01,
     device="cuda:0",
 )
 
@@ -24,7 +25,7 @@ policy_reward_count = 0
 expert_reward = 0
 policy_reward = 0
 count = 0
-optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-2)
+optimizer = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
 
 while True:
     discriminator.eval_mode()
@@ -33,7 +34,7 @@ while True:
         policy_reward_count += policy_reward
         expert_data = motion_loader.random_get_action_pair_batch(24)
         expert_reward, expert_logit = discriminator.forward(expert_data)
-        policy_data = random_array = 2 * np.random.rand(*expert_data.shape) - 1
+        policy_data = torch.randn_like(expert_data, dtype=torch.float32)
         policy_data = torch.tensor(policy_data, dtype=torch.float32).to(
             discriminator.device
         )

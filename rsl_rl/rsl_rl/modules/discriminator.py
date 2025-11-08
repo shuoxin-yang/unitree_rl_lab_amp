@@ -8,6 +8,7 @@ class Discriminator(nn.Module):
         self,
         input_dim: int,
         hidden_dims: list[int],
+        dropout_rate: float,
         device: str = "cuda:0",
     ):
         """
@@ -29,7 +30,9 @@ class Discriminator(nn.Module):
         current_dim = input_dim
         for h_dim in hidden_dims:
             layers.append(nn.Linear(current_dim, h_dim))
+            layers.append(nn.BatchNorm1d(h_dim))  # 2. 添加批归一化
             layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))  # 3. 添加Dropout
             current_dim = h_dim
         # 组合隐藏层并移动到指定设备
         self.trunk = nn.Sequential(*layers).to(device)
@@ -48,7 +51,7 @@ class Discriminator(nn.Module):
             state_trans_pair: 形状为 (batch_size, input_dim) 的张量，表示每一个环境的状态-状态转移对
 
         返回：
-            reward: 形状为 (batch_size) 的张量，表示每一个环境的判别器奖励
+            reward, logit: 形状为 (batch_size) 的张量，表示每一个环境的判别器奖励
         """
         # 确保输入是2D张量
         if state_trans_pair.dim() == 1:

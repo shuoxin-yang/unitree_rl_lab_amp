@@ -4,7 +4,11 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 from isaaclab.utils import configclass
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
@@ -34,6 +38,45 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
-    amp_data_path = "path/to/amp/motion"  # path to AMP motion data
-    amp_data_names = ["walk.npy"]
+    amp = True
+    # amp motion cfg
+    amp_data_path = (
+        "/home/yangyuhui/unitree_rl_lab_amp/AMP_Motion"  # path to AMP motion data
+    )
+    amp_data_names = ["*"]
     amp_data_weights = [1.0]
+    amp_data_noise_scale = 0.01
+    default_joint_pos = [
+        -0.1000,
+        -0.1000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.3000,
+        0.3000,
+        0.3000,
+        0.3000,
+        -0.2000,
+        -0.2000,
+        0.2500,
+        -0.2500,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.9700,
+        0.9700,
+        0.1500,
+        -0.1500,
+        0.0000,
+        0.0000,
+        0.0000,
+        0.0000,
+    ]
+    # amp discriminator cfg
+    hidden_dims = [1024, 512]
+    dropout_rate = 0.5

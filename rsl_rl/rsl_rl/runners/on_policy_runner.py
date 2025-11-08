@@ -22,13 +22,14 @@ from rsl_rl.modules import (
     StudentTeacherRecurrent,
 )
 from rsl_rl.utils import store_code_state
-from rsl_rl.utils.motion_loader import MotionLoader
 
 
 class OnPolicyRunner:
     """On-policy runner for training and evaluation."""
 
-    def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
+    def __init__(
+        self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"
+    ):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
@@ -44,7 +45,9 @@ class OnPolicyRunner:
         elif self.alg_cfg["class_name"] == "Distillation":
             self.training_type = "distillation"
         else:
-            raise ValueError(f"Training type not found for algorithm {self.alg_cfg['class_name']}.")
+            raise ValueError(
+                f"Training type not found for algorithm {self.alg_cfg['class_name']}."
+            )
 
         # resolve dimensions of observations
         obs, extras = self.env.get_observations()
@@ -53,7 +56,9 @@ class OnPolicyRunner:
         # resolve type of privileged observations
         if self.training_type == "rl":
             if "critic" in extras["observations"]:
-                self.privileged_obs_type = "critic"  # actor-critic reinforcement learnig, e.g., PPO
+                self.privileged_obs_type = (
+                    "critic"  # actor-critic reinforcement learnig, e.g., PPO
+                )
             else:
                 self.privileged_obs_type = None
         if self.training_type == "distillation":
@@ -64,22 +69,33 @@ class OnPolicyRunner:
 
         # resolve dimensions of privileged observations
         if self.privileged_obs_type is not None:
-            num_privileged_obs = extras["observations"][self.privileged_obs_type].shape[1]
+            num_privileged_obs = extras["observations"][self.privileged_obs_type].shape[
+                1
+            ]
         else:
             num_privileged_obs = num_obs
 
         # evaluate the policy class
         policy_class = eval(self.policy_cfg.pop("class_name"))
-        policy: ActorCritic | ActorCriticRecurrent | StudentTeacher | StudentTeacherRecurrent = policy_class(
+        policy: (
+            ActorCritic
+            | ActorCriticRecurrent
+            | StudentTeacher
+            | StudentTeacherRecurrent
+        ) = policy_class(
             num_obs, num_privileged_obs, self.env.num_actions, **self.policy_cfg
-        ).to(self.device)
+        ).to(
+            self.device
+        )
 
         # resolve dimension of rnd gated state
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
             # check if rnd gated state is present
             rnd_state = extras["observations"].get("rnd_state")
             if rnd_state is None:
-                raise ValueError("Observations for the key 'rnd_state' not found in infos['observations'].")
+                raise ValueError(
+                    "Observations for the key 'rnd_state' not found in infos['observations']."
+                )
             # get dimension of rnd gated state
             num_rnd_state = rnd_state.shape[1]
             # add rnd gated state to config
@@ -103,13 +119,19 @@ class OnPolicyRunner:
         self.save_interval = self.cfg["save_interval"]
         self.empirical_normalization = self.cfg["empirical_normalization"]
         if self.empirical_normalization:
-            self.obs_normalizer = EmpiricalNormalization(shape=[num_obs], until=1.0e8).to(self.device)
-            self.privileged_obs_normalizer = EmpiricalNormalization(shape=[num_privileged_obs], until=1.0e8).to(
-                self.device
-            )
+            self.obs_normalizer = EmpiricalNormalization(
+                shape=[num_obs], until=1.0e8
+            ).to(self.device)
+            self.privileged_obs_normalizer = EmpiricalNormalization(
+                shape=[num_privileged_obs], until=1.0e8
+            ).to(self.device)
         else:
-            self.obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
-            self.privileged_obs_normalizer = torch.nn.Identity().to(self.device)  # no normalization
+            self.obs_normalizer = torch.nn.Identity().to(
+                self.device
+            )  # no normalization
+            self.privileged_obs_normalizer = torch.nn.Identity().to(
+                self.device
+            )  # no normalization
 
         # init storage and model
         self.alg.init_storage(
@@ -133,12 +155,42 @@ class OnPolicyRunner:
         self.git_status_repos = [rsl_rl.__file__]
 
         # 初始化amp参数
-        if "amp" in extras["observations"]:
-            self.num_amp_obs = extras["observations"]["amp"].shape[1]
-            self.amp_joint_names = extras["observations"][""]
-            self.amp_data = MotionLoader()
+        if train_cfg["amp"]:
+            from rsl_rl.utils.motion_loader import Motion
+            from rsl_rl.modules.discriminator import Discriminator
 
-    def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False):  # noqa: C901
+            self.isAMP = True
+            self.num_amp_obs = extras["observations"]["amp"].shape[1]
+            self.amp_data = Motion(
+                default_joint_pos=train_cfg["default_joint_pos"],
+                train_eval_rate=0.8,
+                device=self.device,
+            )
+            self.discriminator = Discriminator(
+                input_dim=self.num_amp_obs * 2,
+                hidden_dims=train_cfg["hidden_dims"],
+                dropout_rate=train_cfg["dropout_rate"],
+                device=self.device,
+            )
+            self.discriminator_optimizer = torch.optim.Adam(
+                self.discriminator.parameters(),
+                lr=0.1 * self.alg_cfg["learning_rate"],
+                weight_decay=1e-5,
+            )
+            self.data_noise_scale = train_cfg["amp_data_noise_scale"]
+            print(f"Discriminator MLP:{self.discriminator}")
+            self.amp_data.load_motions(
+                motion_folder=train_cfg["amp_data_path"],
+                motion_files=train_cfg["amp_data_names"],
+                weights=train_cfg["amp_data_weights"],
+                target_fps=1 / self.env.unwrapped.step_dt,
+            )
+        else:
+            self.isAMP = False
+
+    def learn(
+        self, num_learning_iterations: int, init_at_random_ep_len: bool = False
+    ):  # noqa: C901
         # initialize writer
         if self.log_dir is not None and self.writer is None and not self.disable_logs:
             # Launch either Tensorboard or Neptune & Tensorboard summary writer(s), default: Tensorboard.
@@ -148,23 +200,35 @@ class OnPolicyRunner:
             if self.logger_type == "neptune":
                 from rsl_rl.utils.neptune_utils import NeptuneSummaryWriter
 
-                self.writer = NeptuneSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
-                self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
+                self.writer = NeptuneSummaryWriter(
+                    log_dir=self.log_dir, flush_secs=10, cfg=self.cfg
+                )
+                self.writer.log_config(
+                    self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg
+                )
             elif self.logger_type == "wandb":
                 from rsl_rl.utils.wandb_utils import WandbSummaryWriter
 
-                self.writer = WandbSummaryWriter(log_dir=self.log_dir, flush_secs=10, cfg=self.cfg)
-                self.writer.log_config(self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg)
+                self.writer = WandbSummaryWriter(
+                    log_dir=self.log_dir, flush_secs=10, cfg=self.cfg
+                )
+                self.writer.log_config(
+                    self.env.cfg, self.cfg, self.alg_cfg, self.policy_cfg
+                )
             elif self.logger_type == "tensorboard":
                 from torch.utils.tensorboard import SummaryWriter
 
                 self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
             else:
-                raise ValueError("Logger type not found. Please choose 'neptune', 'wandb' or 'tensorboard'.")
+                raise ValueError(
+                    "Logger type not found. Please choose 'neptune', 'wandb' or 'tensorboard'."
+                )
 
         # check if teacher is loaded
         if self.training_type == "distillation" and not self.alg.policy.loaded_teacher:
-            raise ValueError("Teacher model parameters not loaded. Please load a teacher model to distill.")
+            raise ValueError(
+                "Teacher model parameters not loaded. Please load a teacher model to distill."
+            )
 
         # randomize initial episode lengths (for exploration)
         if init_at_random_ep_len:
@@ -176,21 +240,30 @@ class OnPolicyRunner:
         obs, extras = self.env.get_observations()
         privileged_obs = extras["observations"].get(self.privileged_obs_type, obs)
         obs, privileged_obs = obs.to(self.device), privileged_obs.to(self.device)
+        amp_obs = extras["observations"]["amp"].to(self.device)
         self.train_mode()  # switch to train mode (for dropout for example)
 
         # Book keeping
         ep_infos = []
         rewbuffer = deque(maxlen=100)
         lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_reward_sum = torch.zeros(
+            self.env.num_envs, dtype=torch.float, device=self.device
+        )
+        cur_episode_length = torch.zeros(
+            self.env.num_envs, dtype=torch.float, device=self.device
+        )
 
         # create buffers for logging extrinsic and intrinsic rewards
         if self.alg.rnd:
             erewbuffer = deque(maxlen=100)
             irewbuffer = deque(maxlen=100)
-            cur_ereward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-            cur_ireward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+            cur_ereward_sum = torch.zeros(
+                self.env.num_envs, dtype=torch.float, device=self.device
+            )
+            cur_ireward_sum = torch.zeros(
+                self.env.num_envs, dtype=torch.float, device=self.device
+            )
 
         # Ensure all parameters are in-synced
         if self.is_distributed:
@@ -204,29 +277,74 @@ class OnPolicyRunner:
         tot_iter = start_iter + num_learning_iterations
         for it in range(start_iter, tot_iter):
             start = time.time()
+            # 初始化amp统计参数
+            if self.isAMP:
+                last_amp_obs = torch.zeros(
+                    (self.env.num_envs, self.num_amp_obs), device=self.device
+                )
+                amp_reward_sums = torch.zeros(
+                    self.env.num_envs, dtype=torch.float, device=self.device
+                )
+                amp_obs_buf = torch.tensor([]).to(self.device)
+                self.amp_prob_sum = torch.zeros(size=(self.env.num_envs, ), dtype=torch.float32, device=self.device)
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
                     actions = self.alg.act(obs, privileged_obs)
                     # Step the environment
-                    obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
+                    obs, rewards, dones, infos = self.env.step(
+                        actions.to(self.env.device)
+                    )
                     # Move to device
-                    obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
+                    obs, rewards, dones = (
+                        obs.to(self.device),
+                        rewards.to(self.device),
+                        dones.to(self.device),
+                    )
                     # perform normalization
                     obs = self.obs_normalizer(obs)
                     if self.privileged_obs_type is not None:
                         privileged_obs = self.privileged_obs_normalizer(
-                            infos["observations"][self.privileged_obs_type].to(self.device)
+                            infos["observations"][self.privileged_obs_type].to(
+                                self.device
+                            )
                         )
                     else:
                         privileged_obs = obs
 
-                    # process the step
-                    self.alg.process_env_step(rewards, dones, infos)
+                    # amp奖励计算
+                    if self.isAMP:
+                        current_amp_obs = infos["observations"]["amp"].to(self.device)
+                        current_amp_obs_pair = torch.cat(
+                            [last_amp_obs, current_amp_obs], dim=-1
+                        )
+                        amp_rewards, amp_logit = self.discriminator.forward(
+                            current_amp_obs_pair
+                        )
+                        amp_rewards *= self.env.unwrapped.step_dt
+                        amp_reward_sums += amp_rewards.squeeze(-1)
+                        # 更新last_amp_obs,加入amp_obs_buf
+                        last_amp_obs = current_amp_obs
+                        amp_obs_buf = torch.cat(
+                            [amp_obs_buf, current_amp_obs_pair], dim=0
+                        )
+                        if self.log_dir and dones.any():
+                            self.amp_reward_logs = (
+                                amp_reward_sums[dones.bool()].mean()
+                                / self.env.unwrapped.max_episode_length_s
+                            ).item()
+                            self.amp_prob_sum += amp_logit
+                            amp_reward_sums[dones.bool()] = 0.0
+                        self.alg.process_env_step(0.5 * rewards + 0.5 * amp_rewards, dones, infos)
+                    else:
+                        # process the step
+                        self.alg.process_env_step(rewards, dones, infos)
 
                     # Extract intrinsic rewards (only for logging)
-                    intrinsic_rewards = self.alg.intrinsic_rewards if self.alg.rnd else None
+                    intrinsic_rewards = (
+                        self.alg.intrinsic_rewards if self.alg.rnd else None
+                    )
 
                     # book keeping
                     if self.log_dir is not None:
@@ -246,14 +364,22 @@ class OnPolicyRunner:
                         # Clear data for completed episodes
                         # -- common
                         new_ids = (dones > 0).nonzero(as_tuple=False)
-                        rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                        rewbuffer.extend(
+                            cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist()
+                        )
+                        lenbuffer.extend(
+                            cur_episode_length[new_ids][:, 0].cpu().numpy().tolist()
+                        )
                         cur_reward_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
                         # -- intrinsic and extrinsic rewards
                         if self.alg.rnd:
-                            erewbuffer.extend(cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                            irewbuffer.extend(cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist())
+                            erewbuffer.extend(
+                                cur_ereward_sum[new_ids][:, 0].cpu().numpy().tolist()
+                            )
+                            irewbuffer.extend(
+                                cur_ireward_sum[new_ids][:, 0].cpu().numpy().tolist()
+                            )
                             cur_ereward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
 
@@ -267,6 +393,31 @@ class OnPolicyRunner:
 
             # update policy
             loss_dict = self.alg.update()
+
+            # update discriminator
+            if self.isAMP:
+                from torch import nn
+
+                expert_data = self.amp_data.random_get_train_action_pair_batch(
+                    amp_obs_buf.shape[0]
+                )
+                noise = torch.randn_like(expert_data, device=expert_data.device)
+                expert_data += noise
+                _, self.mean_expert_prob = self.discriminator.forward(expert_data)
+                self.mean_expert_prob = self.mean_expert_prob.mean().item()
+                self.mean_policy_prob = (
+                    self.amp_prob_sum.mean().item() / self.num_steps_per_env
+                )
+                loss = self.discriminator.compute_loss(
+                    expert_state_trans_pair=expert_data.clone(),
+                    policy_state_trans_pair=amp_obs_buf.clone(),
+                    w_gp=10.0,
+                )
+                self.amp_loss = loss
+                self.discriminator_optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(self.discriminator.linear.parameters(), 1.0)
+                self.discriminator_optimizer.step()
 
             stop = time.time()
             learn_time = stop - start
@@ -292,11 +443,17 @@ class OnPolicyRunner:
 
         # Save the final model after training
         if self.log_dir is not None and not self.disable_logs:
-            self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
+            self.save(
+                os.path.join(
+                    self.log_dir, f"model_{self.current_learning_iteration}.pt"
+                )
+            )
 
     def log(self, locs: dict, width: int = 80, pad: int = 35):
         # Compute the collection size
-        collection_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
+        collection_size = (
+            self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
+        )
         # Update total time-steps and time
         self.tot_timesteps += collection_size
         self.tot_time += locs["collection_time"] + locs["learn_time"]
@@ -324,6 +481,24 @@ class OnPolicyRunner:
                 else:
                     self.writer.add_scalar("Episode/" + key, value, locs["it"])
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
+        # amp infos
+        if self.isAMP:
+            self.writer.add_scalar("AMP/amp_reward", self.amp_reward_logs, locs["it"])
+            ep_string += f"""{'AMP/amp_reward:':>{pad}} {self.amp_reward_logs:.4f}\n"""
+            self.writer.add_scalar(
+                "AMP/mean_policy_discriminator_probility",
+                self.mean_policy_prob,
+                locs["it"],
+            )
+            ep_string += f"""{'AMP/mean_policy_discriminator_probility:':>{pad}} {self.mean_policy_prob:.4f}\n"""
+            self.writer.add_scalar(
+                "AMP/mean_expert_discriminator_probility",
+                self.mean_expert_prob,
+                locs["it"],
+            )
+            ep_string += f"""{'AMP/mean_expert_discriminator_probility:':>{pad}} {self.mean_expert_prob:.4f}\n"""
+            self.writer.add_scalar("AMP/Loss", self.amp_loss, locs["it"])
+            ep_string += f"""{'AMP/Episod_Loss:':>{pad}} {self.amp_loss:.4f}\n"""
 
         mean_std = self.alg.policy.action_std.mean()
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
@@ -338,23 +513,47 @@ class OnPolicyRunner:
 
         # -- Performance
         self.writer.add_scalar("Perf/total_fps", fps, locs["it"])
-        self.writer.add_scalar("Perf/collection time", locs["collection_time"], locs["it"])
+        self.writer.add_scalar(
+            "Perf/collection time", locs["collection_time"], locs["it"]
+        )
         self.writer.add_scalar("Perf/learning_time", locs["learn_time"], locs["it"])
 
         # -- Training
         if len(locs["rewbuffer"]) > 0:
             # separate logging for intrinsic and extrinsic rewards
             if self.alg.rnd:
-                self.writer.add_scalar("Rnd/mean_extrinsic_reward", statistics.mean(locs["erewbuffer"]), locs["it"])
-                self.writer.add_scalar("Rnd/mean_intrinsic_reward", statistics.mean(locs["irewbuffer"]), locs["it"])
+                self.writer.add_scalar(
+                    "Rnd/mean_extrinsic_reward",
+                    statistics.mean(locs["erewbuffer"]),
+                    locs["it"],
+                )
+                self.writer.add_scalar(
+                    "Rnd/mean_intrinsic_reward",
+                    statistics.mean(locs["irewbuffer"]),
+                    locs["it"],
+                )
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # everything else
-            self.writer.add_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
-            self.writer.add_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
-            if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
-                self.writer.add_scalar("Train/mean_reward/time", statistics.mean(locs["rewbuffer"]), self.tot_time)
+            self.writer.add_scalar(
+                "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
+            )
+            self.writer.add_scalar(
+                "Train/mean_episode_length",
+                statistics.mean(locs["lenbuffer"]),
+                locs["it"],
+            )
+            if (
+                self.logger_type != "wandb"
+            ):  # wandb does not support non-integer x-axis logging
                 self.writer.add_scalar(
-                    "Train/mean_episode_length/time", statistics.mean(locs["lenbuffer"]), self.tot_time
+                    "Train/mean_reward/time",
+                    statistics.mean(locs["rewbuffer"]),
+                    self.tot_time,
+                )
+                self.writer.add_scalar(
+                    "Train/mean_episode_length/time",
+                    statistics.mean(locs["lenbuffer"]),
+                    self.tot_time,
                 )
 
         str = f" \033[1m Learning iteration {locs['it']}/{locs['tot_iter']} \033[0m "
@@ -421,7 +620,9 @@ class OnPolicyRunner:
         # -- Save observation normalizer if used
         if self.empirical_normalization:
             saved_dict["obs_norm_state_dict"] = self.obs_normalizer.state_dict()
-            saved_dict["privileged_obs_norm_state_dict"] = self.privileged_obs_normalizer.state_dict()
+            saved_dict["privileged_obs_norm_state_dict"] = (
+                self.privileged_obs_normalizer.state_dict()
+            )
 
         # save model
         torch.save(saved_dict, path)
@@ -433,7 +634,9 @@ class OnPolicyRunner:
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
         # -- Load model
-        resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
+        resumed_training = self.alg.policy.load_state_dict(
+            loaded_dict["model_state_dict"]
+        )
         # -- Load RND model if used
         if self.alg.rnd:
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
@@ -443,19 +646,25 @@ class OnPolicyRunner:
                 # if a previous training is resumed, the actor/student normalizer is loaded for the actor/student
                 # and the critic/teacher normalizer is loaded for the critic/teacher
                 self.obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
-                self.privileged_obs_normalizer.load_state_dict(loaded_dict["privileged_obs_norm_state_dict"])
+                self.privileged_obs_normalizer.load_state_dict(
+                    loaded_dict["privileged_obs_norm_state_dict"]
+                )
             else:
                 # if the training is not resumed but a model is loaded, this run must be distillation training following
                 # an rl training. Thus the actor normalizer is loaded for the teacher model. The student's normalizer
                 # is not loaded, as the observation space could differ from the previous rl training.
-                self.privileged_obs_normalizer.load_state_dict(loaded_dict["obs_norm_state_dict"])
+                self.privileged_obs_normalizer.load_state_dict(
+                    loaded_dict["obs_norm_state_dict"]
+                )
         # -- load optimizer if used
         if load_optimizer and resumed_training:
             # -- algorithm optimizer
             self.alg.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
             # -- RND optimizer if used
             if self.alg.rnd:
-                self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+                self.alg.rnd_optimizer.load_state_dict(
+                    loaded_dict["rnd_optimizer_state_dict"]
+                )
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]
@@ -469,7 +678,9 @@ class OnPolicyRunner:
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x: self.alg.policy.act_inference(self.obs_normalizer(x))  # noqa: E731
+            policy = lambda x: self.alg.policy.act_inference(
+                self.obs_normalizer(x)
+            )  # noqa: E731
         return policy
 
     def train_mode(self):
@@ -482,6 +693,9 @@ class OnPolicyRunner:
         if self.empirical_normalization:
             self.obs_normalizer.train()
             self.privileged_obs_normalizer.train()
+        # amp discriminator
+        if self.isAMP:
+            self.discriminator.train()
 
     def eval_mode(self):
         # -- PPO
@@ -493,6 +707,9 @@ class OnPolicyRunner:
         if self.empirical_normalization:
             self.obs_normalizer.eval()
             self.privileged_obs_normalizer.eval()
+        # amp discriminator
+        if self.isAMP:
+            self.discriminator.eval()
 
     def add_git_repo_to_log(self, repo_file_path):
         self.git_status_repos.append(repo_file_path)
@@ -541,6 +758,8 @@ class OnPolicyRunner:
             )
 
         # initialize torch distributed
-        torch.distributed.init_process_group(backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size)
+        torch.distributed.init_process_group(
+            backend="nccl", rank=self.gpu_global_rank, world_size=self.gpu_world_size
+        )
         # set device to the local rank
         torch.cuda.set_device(self.gpu_local_rank)
