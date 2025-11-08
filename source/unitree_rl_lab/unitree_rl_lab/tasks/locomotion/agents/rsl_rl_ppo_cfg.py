@@ -78,5 +78,5 @@ class BasePPORunnerCfg(RslRlOnPolicyRunnerCfg):
         0.0000,
     ]
     # amp discriminator cfg
-    hidden_dims = [1024, 512]
-    dropout_rate = 0.5
+    hidden_dims = [256, 128]
+    dropout_rate = 0.4

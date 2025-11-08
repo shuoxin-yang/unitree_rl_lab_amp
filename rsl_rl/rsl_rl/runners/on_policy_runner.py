@@ -286,7 +286,9 @@ class OnPolicyRunner:
                     self.env.num_envs, dtype=torch.float, device=self.device
                 )
                 amp_obs_buf = torch.tensor([]).to(self.device)
-                self.amp_prob_sum = torch.zeros(size=(self.env.num_envs, ), dtype=torch.float32, device=self.device)
+                self.amp_prob_sum = torch.zeros(
+                    size=(self.env.num_envs,), dtype=torch.float32, device=self.device
+                )
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -336,7 +338,9 @@ class OnPolicyRunner:
                             ).item()
                             self.amp_prob_sum += amp_logit
                             amp_reward_sums[dones.bool()] = 0.0
-                        self.alg.process_env_step(0.5 * rewards + 0.5 * amp_rewards, dones, infos)
+                        self.alg.process_env_step(
+                            0.5 * rewards + 0.5 * amp_rewards, dones, infos
+                        )
                     else:
                         # process the step
                         self.alg.process_env_step(rewards, dones, infos)
@@ -398,6 +402,7 @@ class OnPolicyRunner:
             if self.isAMP:
                 from torch import nn
 
+                # 常规更新
                 expert_data = self.amp_data.random_get_train_action_pair_batch(
                     amp_obs_buf.shape[0]
                 )
@@ -418,6 +423,31 @@ class OnPolicyRunner:
                 loss.backward()
                 nn.utils.clip_grad_norm_(self.discriminator.linear.parameters(), 1.0)
                 self.discriminator_optimizer.step()
+                # 验证过拟合问题
+                self.discriminator.eval_mode()
+                with torch.no_grad():
+                    expert_eval_data = self.amp_data.random_get_eval_action_pair_batch(
+                        16
+                    )
+                    expert_eval_data += torch.randn_like(
+                        expert_eval_data, device=expert_data.device
+                    )
+                    _, self.mean_expert_eval_prob = self.discriminator.forward(
+                        expert_eval_data
+                    )
+                    self.mean_expert_eval_prob = (
+                        self.mean_expert_eval_prob.mean().item()
+                    )
+                    _, self.mean_policy_eval_prob = self.discriminator.forward(
+                        amp_obs_buf
+                    )
+                    self.mean_policy_eval_prob = (
+                        self.mean_policy_eval_prob.mean().item()
+                    )
+                    self.eval_loss = (self.mean_expert_eval_prob - 1) ** 2 + (
+                        self.mean_policy_eval_prob + 1
+                    ) ** 2
+                self.discriminator.train_mode()
 
             stop = time.time()
             learn_time = stop - start
@@ -483,22 +513,43 @@ class OnPolicyRunner:
                     ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         # amp infos
         if self.isAMP:
+            # amp_reward
             self.writer.add_scalar("AMP/amp_reward", self.amp_reward_logs, locs["it"])
             ep_string += f"""{'AMP/amp_reward:':>{pad}} {self.amp_reward_logs:.4f}\n"""
+            # train_policy_prob
             self.writer.add_scalar(
                 "AMP/mean_policy_discriminator_probility",
                 self.mean_policy_prob,
                 locs["it"],
             )
             ep_string += f"""{'AMP/mean_policy_discriminator_probility:':>{pad}} {self.mean_policy_prob:.4f}\n"""
+            # train_expert_prob
             self.writer.add_scalar(
                 "AMP/mean_expert_discriminator_probility",
                 self.mean_expert_prob,
                 locs["it"],
             )
             ep_string += f"""{'AMP/mean_expert_discriminator_probility:':>{pad}} {self.mean_expert_prob:.4f}\n"""
+            # eval_policy_prob
+            self.writer.add_scalar(
+                "AMP/mean_policy_eval_discriminator_probility",
+                self.mean_policy_eval_prob,
+                locs["it"],
+            )
+            ep_string += f"""{'AMP/mean_policy_eval_discriminator_probility:':>{pad}} {self.mean_policy_eval_prob:.4f}\n"""
+            # eval_expert_prob
+            self.writer.add_scalar(
+                "AMP/mean_expert_eval_discriminator_probility",
+                self.mean_expert_eval_prob,
+                locs["it"],
+            )
+            ep_string += f"""{'AMP/mean_expert_eval_discriminator_probility:':>{pad}} {self.mean_expert_eval_prob:.4f}\n"""
+            # train_loss
             self.writer.add_scalar("AMP/Loss", self.amp_loss, locs["it"])
             ep_string += f"""{'AMP/Episod_Loss:':>{pad}} {self.amp_loss:.4f}\n"""
+            # eval_loss, not include gradient
+            self.writer.add_scalar("AMP/Eval_Loss", self.eval_loss, locs["it"])
+            ep_string += f"""{'AMP/Episod_Eval_Loss:':>{pad}} {self.eval_loss:.4f}\n"""
 
         mean_std = self.alg.policy.action_std.mean()
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))

@@ -112,7 +112,7 @@ class Motion:
                 dim=0,
             ).to(self.device)
             state_trans_pair = torch.cat([state, next_state], dim=0).to(self.device)
-            if torch.rand(0, 1) < self.train_eval_rate:
+            if torch.rand((1)) < self.train_eval_rate:
                 self.train_action_pairs.append(state_trans_pair)
             else:
                 self.eval_action_pairs.append(state_trans_pair)
@@ -128,13 +128,16 @@ class Motion:
         return self.eval_action_pairs[index[0]]
 
     def random_get_train_action_pair_batch(self, batch_size: int):
-        """随机获取一批动作对"""
+        """随机获取一批训练动作对"""
         indices = np.random.randint(0, len(self.train_action_pairs), batch_size)
         batch = torch.stack([self.train_action_pairs[i] for i in indices], dim=0)
         return batch
     
     def random_get_eval_action_pair_batch(self, batch_size: int):
-        """随机获取一批动作对"""
+        """随机获取一批评估动作对"""
+        if batch_size > len(self.eval_action_pairs):
+            print("[INF_MotionLoader] Too large size for eval pairs")
+            return torch.tensor([], device=self.device)
         indices = np.random.randint(0, len(self.eval_action_pairs), batch_size)
         batch = torch.stack([self.eval_action_pairs[i] for i in indices], dim=0)
         return batch
