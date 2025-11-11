@@ -155,21 +155,24 @@ class OnPolicyRunner:
         self.git_status_repos = [rsl_rl.__file__]
 
         # 初始化amp参数
-        if train_cfg["amp"]:
+        if train_cfg["isAMP"]:
             from rsl_rl.utils.motion_loader import Motion
             from rsl_rl.modules.discriminator import Discriminator
 
             self.isAMP = True
+            self.amp_cfg = train_cfg["amp"]
             self.num_amp_obs = extras["observations"]["amp"].shape[1]
             self.amp_data = Motion(
-                default_joint_pos=train_cfg["default_joint_pos"],
+                default_joint_pos=self.amp_cfg["default_joint_pos"],
                 train_eval_rate=0.8,
                 device=self.device,
             )
             self.discriminator = Discriminator(
                 input_dim=self.num_amp_obs * 2,
-                hidden_dims=train_cfg["hidden_dims"],
-                dropout_rate=train_cfg["dropout_rate"],
+                hidden_dims=self.amp_cfg["hidden_dims"],
+                dropout_rates=(
+                    self.amp_cfg["dropout_rate"] if self.amp_cfg["use_dropout"] else [0]
+                ),
                 device=self.device,
             )
             self.discriminator_optimizer = torch.optim.Adam(
@@ -177,12 +180,12 @@ class OnPolicyRunner:
                 lr=0.1 * self.alg_cfg["learning_rate"],
                 weight_decay=1e-5,
             )
-            self.data_noise_scale = train_cfg["amp_data_noise_scale"]
+            self.data_noise_scale = self.amp_cfg["amp_data_noise_scale"]
             print(f"Discriminator MLP:{self.discriminator}")
             self.amp_data.load_motions(
-                motion_folder=train_cfg["amp_data_path"],
-                motion_files=train_cfg["amp_data_names"],
-                weights=train_cfg["amp_data_weights"],
+                motion_folder=self.amp_cfg["amp_data_path"],
+                motion_files=self.amp_cfg["amp_data_names"],
+                weights=self.amp_cfg["amp_data_weights"],
                 target_fps=1 / self.env.unwrapped.step_dt,
             )
         else:
@@ -289,6 +292,7 @@ class OnPolicyRunner:
                 self.amp_prob_sum = torch.zeros(
                     size=(self.env.num_envs,), dtype=torch.float32, device=self.device
                 )
+                self.amp_reward_logs = 0
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
@@ -338,9 +342,7 @@ class OnPolicyRunner:
                             ).item()
                             self.amp_prob_sum += amp_logit
                             amp_reward_sums[dones.bool()] = 0.0
-                        self.alg.process_env_step(
-                            0.5 * rewards + 0.5 * amp_rewards, dones, infos
-                        )
+                        self.alg.process_env_step(rewards + amp_rewards, dones, infos)
                     else:
                         # process the step
                         self.alg.process_env_step(rewards, dones, infos)
@@ -407,7 +409,7 @@ class OnPolicyRunner:
                     amp_obs_buf.shape[0]
                 )
                 noise = torch.randn_like(expert_data, device=expert_data.device)
-                expert_data += noise
+                expert_data += noise * self.data_noise_scale
                 _, self.mean_expert_prob = self.discriminator.forward(expert_data)
                 self.mean_expert_prob = self.mean_expert_prob.mean().item()
                 self.mean_policy_prob = (
@@ -419,18 +421,23 @@ class OnPolicyRunner:
                     w_gp=10.0,
                 )
                 self.amp_loss = loss
-                self.discriminator_optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(self.discriminator.linear.parameters(), 1.0)
-                self.discriminator_optimizer.step()
+                # 定期更新
+                if it % self.amp_cfg["update_period"] == 0:
+                    self.discriminator_optimizer.zero_grad()
+                    loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        self.discriminator.linear.parameters(), 1.0
+                    )
+                    self.discriminator_optimizer.step()
                 # 验证过拟合问题
                 self.discriminator.eval_mode()
                 with torch.no_grad():
                     expert_eval_data = self.amp_data.random_get_eval_action_pair_batch(
                         16
                     )
-                    expert_eval_data += torch.randn_like(
-                        expert_eval_data, device=expert_data.device
+                    expert_eval_data += (
+                        torch.randn_like(expert_eval_data, device=expert_data.device)
+                        * self.data_noise_scale
                     )
                     _, self.mean_expert_eval_prob = self.discriminator.forward(
                         expert_eval_data
@@ -438,15 +445,18 @@ class OnPolicyRunner:
                     self.mean_expert_eval_prob = (
                         self.mean_expert_eval_prob.mean().item()
                     )
-                    _, self.mean_policy_eval_prob = self.discriminator.forward(
-                        amp_obs_buf
-                    )
-                    self.mean_policy_eval_prob = (
-                        self.mean_policy_eval_prob.mean().item()
-                    )
-                    self.eval_loss = (self.mean_expert_eval_prob - 1) ** 2 + (
-                        self.mean_policy_eval_prob + 1
-                    ) ** 2
+                    if self.amp_cfg["use_dropout"]:
+                        _, self.mean_policy_eval_prob = self.discriminator.forward(
+                            amp_obs_buf
+                        )
+                        self.mean_policy_eval_prob = (
+                            self.mean_policy_eval_prob.mean().item()
+                        )
+                        self.eval_loss = (self.mean_expert_eval_prob - 1) ** 2 + (
+                            self.mean_policy_eval_prob + 1
+                        ) ** 2
+                    else:
+                        self.eval_loss = (self.mean_expert_eval_prob - 1) ** 2
                 self.discriminator.train_mode()
 
             stop = time.time()
@@ -531,12 +541,13 @@ class OnPolicyRunner:
             )
             ep_string += f"""{'AMP/mean_expert_discriminator_probility:':>{pad}} {self.mean_expert_prob:.4f}\n"""
             # eval_policy_prob
-            self.writer.add_scalar(
-                "AMP/mean_policy_eval_discriminator_probility",
-                self.mean_policy_eval_prob,
-                locs["it"],
-            )
-            ep_string += f"""{'AMP/mean_policy_eval_discriminator_probility:':>{pad}} {self.mean_policy_eval_prob:.4f}\n"""
+            if self.amp_cfg["use_dropout"]:
+                self.writer.add_scalar(
+                    "AMP/mean_policy_eval_discriminator_probility",
+                    self.mean_policy_eval_prob,
+                    locs["it"],
+                )
+                ep_string += f"""{'AMP/mean_policy_eval_discriminator_probility:':>{pad}} {self.mean_policy_eval_prob:.4f}\n"""
             # eval_expert_prob
             self.writer.add_scalar(
                 "AMP/mean_expert_eval_discriminator_probility",

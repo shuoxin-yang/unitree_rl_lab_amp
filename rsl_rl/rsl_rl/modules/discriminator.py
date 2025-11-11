@@ -8,7 +8,7 @@ class Discriminator(nn.Module):
         self,
         input_dim: int,
         hidden_dims: list[int],
-        dropout_rate: float,
+        dropout_rates: list[float],
         device: str = "cuda:0",
     ):
         """
@@ -20,20 +20,23 @@ class Discriminator(nn.Module):
         super(Discriminator, self).__init__()
         # 初始化参数
         self.device = device
-        # # 添加数据归一化层
-        # self.running_mean = torch.zeros(input_dim, device=device)
-        # self.running_var = torch.ones(input_dim, device=device)
-        # self.batch_norm = nn.BatchNorm1d(input_dim).to(device)
-        # self.batch_norm.eval()  # 固定归一化层参数
         # 构建网络层
         layers = []
         current_dim = input_dim
-        for h_dim in hidden_dims:
-            layers.append(nn.Linear(current_dim, h_dim))
-            layers.append(nn.BatchNorm1d(h_dim))  # 2. 添加批归一化
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout(dropout_rate))  # 3. 添加Dropout
-            current_dim = h_dim
+        if len(dropout_rates) == 1 and dropout_rates[0] == 0:
+            # 纯链接模式
+            for h_dim in hidden_dims:
+                layers.append(nn.Linear(current_dim, h_dim))
+                layers.append(nn.ReLU())
+                current_dim = h_dim
+        else:
+            # 防止过拟合模式
+            for h_dim, dropout_rate in zip(hidden_dims, dropout_rates):
+                layers.append(nn.Linear(current_dim, h_dim))
+                layers.append(nn.BatchNorm1d(h_dim))  # 2. 添加批归一化
+                layers.append(nn.ReLU())
+                layers.append(nn.Dropout(dropout_rate))  # 3. 添加Dropout
+                current_dim = h_dim
         # 组合隐藏层并移动到指定设备
         self.trunk = nn.Sequential(*layers).to(device)
         # 链接最后的隐藏层与输出层，输出为标量

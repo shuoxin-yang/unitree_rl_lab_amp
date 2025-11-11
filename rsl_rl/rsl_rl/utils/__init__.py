@@ -13,3 +13,4 @@ from .utils import (
     unpad_trajectories,
 )
 from .motion_loader import Motion
+from .AMPCfg import AMPCfg

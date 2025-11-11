@@ -92,6 +92,7 @@ class Motion:
             f"[INF_MotionLoader]: File name: {file_name},\tInitFPS: {original_fps:.4f},\tTotal frames: {original_dof_positions.shape[0]}",
             end="",
         )
+        itp_root_rot = itp_root_rot[:, [3, 0, 1, 2]]  # 由xyzw转换为wxyz
         for i in range(itp_dof_pos.shape[0] - 1):
             state = torch.cat(
                 [
@@ -99,6 +100,7 @@ class Motion:
                     itp_dof_vel[i],
                     itp_root_lin_vel[i],
                     itp_root_ang_vel[i],
+                    itp_root_rot[i],
                 ],
                 dim=0,
             ).to(self.device)
@@ -108,6 +110,7 @@ class Motion:
                     itp_dof_vel[i + 1],
                     itp_root_lin_vel[i + 1],
                     itp_root_ang_vel[i + 1],
+                    itp_root_rot[i + 1],
                 ],
                 dim=0,
             ).to(self.device)
